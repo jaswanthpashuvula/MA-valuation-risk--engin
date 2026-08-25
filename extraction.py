@@ -1,36 +1,18 @@
 """
-================================================================================
- EXTRACTION MODULE  —  Week 1 / Day 1
- "Pull live Income Statement, Balance Sheet, and Cash Flow data for a target
-  company and its peer set via yfinance."
-================================================================================
+Pulls Income Statement, Balance Sheet, and Cash Flow data from yfinance for a
+target ticker plus its peer group, and reshapes it into a long/tidy format
+that's easy to load into a SQL table.
 
-DESIGN NOTES (why the module is shaped this way)
---------------------------------------------------------------------------
-1. WIDE vs. TIDY outputs
-   yfinance natively returns "wide" DataFrames: rows = line items, columns =
-   period-end dates. That shape is convenient for financial *calculation*
-   (Day 2/3 modules consume it directly), but it's a poor fit for a SQL
-   table because line items differ across companies (a bank has no "Capital
-   Expenditure" the way an industrial does) and yfinance's label set drifts
-   over time. So this module also produces a "tidy" / long-format table:
+Statements come back from yfinance as "wide" DataFrames — line items as rows,
+period dates as columns. That's fine for the actual math (metrics.py and
+fcff.py both use it directly), but it's a bad fit for a database table since
+companies don't all report the same line items and yfinance's labels change
+between versions. So this module also melts everything into:
 
-        ticker | statement_type | period_type | period_end | line_item | value
+    ticker | statement_type | period_type | period_end | line_item | value
 
-   That schema never needs a migration when a new line item shows up — it's
-   the standard EAV-style shape for heterogeneous financial statement data
-   and maps 1:1 onto `DataFrame.to_sql(..., if_exists="append")`.
-
-2. PER-TICKER FAULT ISOLATION
-   In a peer-comp run, one bad/delisted ticker should not kill the batch.
-   `extract_universe()` wraps each ticker in try/except and logs + skips
-   failures, returning whatever succeeded.
-
-3. MODULARITY
-   Every function does exactly one job (fetch profile, fetch statements,
-   melt to tidy) so Day 2/3 modules — and later, a SQL loader — can import
-   and reuse them independently.
-================================================================================
+which is just a standard fact-table shape — one row per data point, no
+schema changes needed when a new line item shows up.
 """
 
 from __future__ import annotations
@@ -45,22 +27,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger(__name__)
 
 
-# ==============================================================================
-# 1. COMPANY PROFILE  (single row of descriptive + market data per ticker)
-# ==============================================================================
 def fetch_company_profile(ticker: str) -> dict:
-    """
-    Pulls descriptive + live market data needed later for WACC/DCF (beta,
-    market cap, share count, price) plus sector/industry for peer grouping.
-
-    Financial purpose: this is the "market-observable" input set — as
-    opposed to the statement data below, which is *reported/historical* —
-    so it's kept in its own table (one row per ticker, not time-series).
-    """
+    """Market/descriptive data for one ticker — beta, market cap, sector, etc."""
     tk = yf.Ticker(ticker)
     info = tk.info or {}
 
-    profile = {
+    return {
         "ticker": ticker.upper(),
         "short_name": info.get("shortName"),
         "sector": info.get("sector"),
@@ -72,22 +44,13 @@ def fetch_company_profile(ticker: str) -> dict:
         "current_price": info.get("currentPrice") or info.get("regularMarketPrice"),
         "extraction_timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    return profile
 
 
-# ==============================================================================
-# 2. RAW STATEMENT EXTRACTION  (wide format — used for calculation)
-# ==============================================================================
 def fetch_raw_statements(ticker: str, period_type: str = "annual") -> dict[str, pd.DataFrame]:
     """
-    Pulls the three core financial statements for `ticker` and returns them
-    as wide DataFrames (index = line item, columns = period-end date),
-    sorted chronologically ascending so that later .diff()/.pct_change()
-    growth math (Day 2) reads left-to-right = oldest -> newest, matching how
-    an analyst would read a model.
-
-    period_type: "annual" -> uses income_stmt / balance_sheet / cashflow
-                 "quarterly" -> uses quarterly_income_stmt / etc.
+    Returns the three core statements as wide DataFrames, sorted so columns
+    run oldest -> newest (makes pct_change()/diff() calls read naturally
+    later on).
     """
     tk = yf.Ticker(ticker)
 
@@ -110,28 +73,13 @@ def fetch_raw_statements(ticker: str, period_type: str = "annual") -> dict[str, 
     }
 
 
-# ==============================================================================
-# 3. TIDY / LONG-FORMAT TRANSFORM  (SQL-ready)
-# ==============================================================================
 def melt_statement_to_tidy(
     df: pd.DataFrame,
     ticker: str,
     statement_type: str,
     period_type: str = "annual",
 ) -> pd.DataFrame:
-    """
-    Reshapes one wide statement DataFrame into the tidy long format described
-    at the top of this module.
-
-    Programming logic: `DataFrame.melt` is the pandas primitive for wide ->
-    long reshaping; we first move the line-item index into a column
-    (`reset_index`) so melt can treat every period column uniformly.
-
-    Financial purpose: produces one fact row per (ticker, statement,
-    line-item, period) — the atomic grain a SQL analyst or downstream BI
-    tool would query ("give me Total Revenue for AAPL by year"), independent
-    of how many/which line items a given company reports.
-    """
+    """Reshapes one wide statement into the long format described up top."""
     if df is None or df.empty:
         return pd.DataFrame(
             columns=["ticker", "statement_type", "period_type", "period_end", "line_item", "value"]
@@ -148,29 +96,20 @@ def melt_statement_to_tidy(
     tidy["period_end"] = pd.to_datetime(tidy["period_end"]).dt.date
     tidy["extraction_timestamp"] = datetime.now(timezone.utc).isoformat()
 
-    # Drop rows with no reported value (common for line items that don't
-    # apply to a given company/period) — keeps the SQL fact table dense.
-    tidy = tidy.dropna(subset=["value"]).reset_index(drop=True)
-    return tidy
+    # drop line items a company didn't report for a given period, keeps the table dense
+    return tidy.dropna(subset=["value"]).reset_index(drop=True)
 
 
-# ==============================================================================
-# 4. UNIVERSE-LEVEL ORCHESTRATION  (target + peers, fault-isolated)
-# ==============================================================================
 def extract_universe(
     tickers: list[str], period_type: str = "annual"
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, dict[str, pd.DataFrame]]]:
     """
-    Runs the full Day-1 extraction across a list of tickers (target + peers).
+    Runs extraction across a list of tickers. One bad/delisted ticker doesn't
+    stop the rest of the batch — it just gets logged and skipped.
 
-    Returns
-    -------
-    profiles_df   : one row per ticker (market/descriptive data)
-    raw_tidy_df   : long-format fact table, all statements, all tickers
-                    (this is what gets loaded into SQL)
-    raw_wide_dict : {ticker: {"income_stmt": df, "balance_sheet": df, "cash_flow": df}}
-                    (this is what Day 2/3 calculation modules consume directly —
-                    no need to re-fetch or pivot back out of SQL mid-pipeline)
+    Returns company profiles, the combined tidy fact table (ready for SQL),
+    and a dict of the wide statements per ticker (what the metrics/fcff
+    modules actually calculate off of).
     """
     profiles, tidy_frames = [], []
     raw_wide_dict: dict[str, dict[str, pd.DataFrame]] = {}
@@ -187,8 +126,6 @@ def extract_universe(
                 tidy_frames.append(melt_statement_to_tidy(df, ticker, statement_type, period_type))
 
         except Exception as exc:
-            # Fault isolation: log and continue so one bad ticker (e.g. a
-            # delisting or a rate-limit blip) doesn't abort the whole batch.
             logger.warning("Skipping '%s' — extraction failed: %s", ticker, exc)
             continue
 
@@ -199,8 +136,7 @@ def extract_universe(
 
 
 if __name__ == "__main__":
-    # Quick standalone smoke test: `python extraction.py`
-    from config import UNIVERSE, PERIOD_TYPE
+    from config import PERIOD_TYPE, UNIVERSE
 
     profiles_df, raw_tidy_df, raw_wide_dict = extract_universe(UNIVERSE, period_type=PERIOD_TYPE)
     print("\n--- Company Profiles ---")

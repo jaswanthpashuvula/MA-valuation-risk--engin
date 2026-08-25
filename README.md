@@ -1,39 +1,52 @@
-# 📊 M&A Quantitative Risk & Valuation Pipeline
+# Valuation Engine
 
-An automated quantitative finance engine built to streamline target asset valuation and market risk stress-testing for M&A desks.
+A Python pipeline for pulling company financials and building a discounted cash flow model. Given a ticker and a list of peers, it fetches Income Statement, Balance Sheet, and Cash Flow data through `yfinance`, works out historical margins and growth rates, and projects Free Cash Flow to Firm (FCFF) five years out.
 
-## 🛠️ Tech Stack & Architecture
-•⁠  ⁠*Language:* Python 3 (Pandas, NumPy, yfinance)
-•⁠  ⁠*Database:* SQLite3 (Relational structure tracking 2,600+ entries)
-•⁠  ⁠*Risk Engine:* 10,000-path stochastic Monte Carlo simulation
+I put this together to practice building something closer to how a valuation model would actually get assembled at a bank or in equity research — separate stages for data extraction, ratio analysis, and forecasting, with output that lands in a database instead of just printing to a terminal.
 
-## 📈 System Execution Output
-When executed locally, the end-to-end extraction pipeline populates the relational database, and the stochastic model outputs the following baseline risk thresholds:
+## Structure
 
-⁠ text
-🎲 Running 10,000 Monte Carlo simulation paths...
+- `config.py` — tickers and valuation assumptions live here
+- `extraction.py` — pulls the three statements from yfinance for a target + peer group
+- `metrics.py` — revenue growth, EBITDA margin, CapEx/revenue, D&A/revenue, working capital swings, effective tax rate
+- `fcff.py` — the FCFF formula, applied both to historical actuals (as a sanity check) and to the 5-year forecast
+- `pipeline.py` — runs all of the above and loads the results into SQLite
 
-📊 RISK SIMULATION RESULTS:
-➡️ Simulated Median Valuation: \$2384.07B
-⚠️ 95% Corporate Value-at-Risk (VaR): \$1608.75B
+## Getting started
 
-✅ Simulation complete. Risk metrics tracked.
- ⁠
+```bash
+pip install -r requirements.txt
+python pipeline.py
+```
 
-## 📁 Project System Architecture Documentation
+Edit `TARGET_TICKER` and `PEER_TICKERS` in `config.py` first if you want to run it on something other than AAPL/MSFT/GOOGL/DELL.
 
-### ⚙️ 1. Automated ETL Financial Ingestion Layer (⁠ extraction.py ⁠, ⁠ config.py ⁠)
-•⁠  ⁠*Objective:* Mitigate core operational risks and data latency inherent in manual investment analyst financial statement inputs.
-•⁠  ⁠*Mechanism:* Architected an asynchronous data extraction module utilizing the ⁠ yfinance ⁠ API framework to programmatically pull multi-ticker GAAP/IFRS balance sheets, income statements, and cash flow historical documentation. 
+Each file can also be run on its own for testing (`python extraction.py`, etc.).
 
-### 📊 2. Relational Analytics & Database Pipeline (⁠ metrics.py ⁠, ⁠ pipeline.py ⁠)
-•⁠  ⁠*Objective:* Implement a high-integrity repository framework to clean and normalize raw structural accounting schedules into queryable data fields.
-•⁠  ⁠*Mechanism:* Engineered a normalized, transactional SQLite data layout tracking nested historical profiles across revenue metrics and dynamic EBITDA margins.
+## FCFF formula
 
-### 📈 3. Predictive Valuation & DCF Engine (⁠ fcff.py ⁠)
-•⁠  ⁠*Objective:* Construct a multi-variable algorithmic valuation matrix to automate structural forward-looking financial forecasting.
-•⁠  ⁠*Mechanism:* Synthesizes historical peer parameters to auto-generate a 5-year discrete projection period for Free Cash Flows to Firm (FCFF). Computes WACC via CAPM to derive intrinsic per-share targets.
+```
+FCFF = EBIT x (1 - tax rate) + D&A - CapEx + change in NWC
+```
 
-### 🎲 4. Stochastic Risk Simulation & Downside Stress-Testing (⁠ risk_simulation.py ⁠)
-•⁠  ⁠*Objective:* Provide a sophisticated alternative to single-scenario analysis by quantifying corporate asset valuations across thousands of volatile macro environments.
-•⁠  ⁠*Mechanism:* Deployed a high-density, 10,000-iteration Monte Carlo simulation engine utilizing ⁠ NumPy ⁠ vectorized execution logic. Applies continuous statistical distributions to systematically shock underlying parameters, implementing a strict ⁠ 95% Confidence Value-at-Risk (VaR) ⁠ optimization floor calculation.
+FCFF is unlevered cash flow — before any debt or equity financing effects — so it gets discounted at WACC rather than cost of equity when building out the full DCF.
+
+## Output tables
+
+Everything gets written to a SQLite file (`mna_valuation.db`) as long/tidy tables, which made it easy to query and also easy to swap for a real Postgres instance later without touching the calculation code:
+
+| Table | What's in it |
+|---|---|
+| `company_profiles` | one row per ticker — beta, market cap, sector |
+| `raw_financials` | every line item, every period, every ticker |
+| `historical_metrics` | the calculated ratios above, by period |
+| `fcff_actuals` | reconstructed FCFF from reported numbers |
+| `fcff_forecast` | the 5-year projection |
+
+## What's not done yet
+
+WACC estimation, terminal value, and the enterprise-value-to-share-price bridge aren't built yet — the forecast table this produces is meant to feed into that next. Also on the list: sensitivity tables and a proper trading comps cross-check against the peer set.
+
+## Notes
+
+Data comes from Yahoo Finance via yfinance, which is free but occasionally inconsistent — some tickers report line items under different labels, and a few smaller companies are missing fields entirely. Worth double-checking against the actual 10-K before trusting any output for real. Not investment advice, obviously.

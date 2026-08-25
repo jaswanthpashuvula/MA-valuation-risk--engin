@@ -1,27 +1,13 @@
 """
-================================================================================
- METRICS MODULE  —  Week 1 / Day 2
- "Calculate historical margins" (revenue growth, EBITDA margin, CapEx/Revenue,
-  D&A/Revenue, Change-in-NWC/Revenue, effective tax rate) for the target and
-  every peer, from the wide statement data Day 1 extracted.
-================================================================================
+Historical margin/ratio calculations — revenue growth, EBITDA margin, CapEx
+intensity, D&A intensity, working capital swings, and effective tax rate —
+built from the wide statements extraction.py returns.
 
-DESIGN NOTES
---------------------------------------------------------------------------
-- `find_line_item()` is the single point of contact with yfinance's label
-  drift. Every calculation function below goes through it rather than
-  indexing statements directly with a hardcoded string — this is what makes
-  the module resilient to a company not reporting "EBIT" line-by-line, or a
-  yfinance version renaming "Capital Expenditure" to "Capital Expenditures".
-- Every metric function returns a full historical pandas Series (so you can
-  inspect trend/volatility, not just an average) AND the module exposes a
-  `summarize_averages()` helper that collapses each Series to the single
-  number Day 3's forecast will actually consume.
-- `build_metrics_tidy()` mirrors extraction.py's tidy pattern
-  (ticker | period_end | metric_name | value) so historical margins land in
-  their own clean SQL fact table, joinable to the raw statement facts on
-  (ticker, period_end).
-================================================================================
+find_line_item() is the one place that deals with yfinance's label drift
+(e.g. some tickers report "Capital Expenditure", others "Capital
+Expenditures"). Every calc below goes through it instead of indexing a
+DataFrame with a hardcoded string, so a missing/renamed line item degrades
+to NaN for that one metric instead of crashing the whole run.
 """
 
 from __future__ import annotations
@@ -32,30 +18,18 @@ import numpy as np
 import pandas as pd
 
 
-# ==============================================================================
-# 1. DEFENSIVE LINE-ITEM LOOKUP
-# ==============================================================================
 def find_line_item(df: pd.DataFrame, aliases: list[str]) -> pd.Series:
-    """
-    Scans `df.index` for the first case-insensitive exact or substring match
-    against a prioritized list of `aliases`, returning that row as a float
-    Series indexed by period-end date.
-
-    Programming logic: avoids a hard KeyError crash when a label varies by
-    issuer/version; instead fails soft (returns an all-NaN Series aligned to
-    df's columns) so downstream ratio math produces NaN for that one metric
-    rather than halting the whole pipeline.
-    """
+    """Looks up a row by trying each alias, case-insensitive, exact then substring match."""
     if df is None or df.empty:
         return pd.Series(dtype=float)
 
     idx_lower = {str(i).lower(): i for i in df.index}
 
-    for alias in aliases:  # Pass 1: exact match
+    for alias in aliases:
         if alias.lower() in idx_lower:
             return df.loc[idx_lower[alias.lower()]].astype(float)
 
-    for alias in aliases:  # Pass 2: substring match (catches minor label variants)
+    for alias in aliases:
         for lower_label, original_label in idx_lower.items():
             if alias.lower() in lower_label:
                 return df.loc[original_label].astype(float)
@@ -63,31 +37,14 @@ def find_line_item(df: pd.DataFrame, aliases: list[str]) -> pd.Series:
     return pd.Series(np.nan, index=df.columns)
 
 
-# ==============================================================================
-# 2. INDIVIDUAL METRIC CALCULATIONS
-# ==============================================================================
 def calculate_revenue_growth(income_stmt: pd.DataFrame) -> pd.Series:
-    """
-    YoY Revenue Growth = (Revenue_t / Revenue_t-1) - 1
-
-    Financial purpose: the primary top-line driver for the FCFF forecast —
-    everything in a simple 3-statement-lite model (EBITDA, CapEx, NWC) is
-    scaled off projected revenue, so this is the single most important
-    historical average the model computes.
-    """
+    """YoY revenue growth — the main driver the forecast scales off of."""
     revenue = find_line_item(income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"])
     return revenue.pct_change()
 
 
 def calculate_ebitda_margin(income_stmt: pd.DataFrame, cash_flow: pd.DataFrame) -> pd.Series:
-    """
-    EBITDA Margin = EBITDA / Revenue
-
-    EBITDA is used directly if Yahoo reports it; otherwise reconstructed as
-    EBIT + D&A (D&A is added back because EBIT already has it deducted as an
-    operating expense — reversing nets out to earnings before that non-cash
-    charge).
-    """
+    """EBITDA / Revenue. Falls back to EBIT + D&A if EBITDA isn't reported directly."""
     revenue = find_line_item(income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"])
     ebitda = find_line_item(income_stmt, ["EBITDA", "Normalized EBITDA"])
 
@@ -100,21 +57,14 @@ def calculate_ebitda_margin(income_stmt: pd.DataFrame, cash_flow: pd.DataFrame) 
 
 
 def calculate_capex_to_revenue(income_stmt: pd.DataFrame, cash_flow: pd.DataFrame) -> pd.Series:
-    """
-    CapEx / Revenue — capital intensity ratio.
-
-    CapEx is reported by yfinance as a negative number (cash outflow in the
-    investing section); we take the absolute value so the ratio reads as a
-    positive percentage of revenue, matching how it's discussed in IC memos
-    ("CapEx runs ~5% of revenue").
-    """
+    """CapEx / Revenue. yfinance reports CapEx as a negative cash outflow, so take abs()."""
     revenue = find_line_item(income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"])
     capex = find_line_item(cash_flow, ["Capital Expenditure", "Capital Expenditures", "Purchase Of PPE"])
     return capex.abs() / revenue
 
 
 def calculate_da_to_revenue(income_stmt: pd.DataFrame, cash_flow: pd.DataFrame) -> pd.Series:
-    """D&A / Revenue — feeds both the EBITDA->EBIT bridge and the FCFF non-cash add-back."""
+    """D&A / Revenue — used both for the EBITDA->EBIT bridge and the FCFF add-back."""
     revenue = find_line_item(income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"])
     d_and_a = find_line_item(cash_flow, ["Depreciation And Amortization", "Depreciation Amortization Depletion"])
     return d_and_a / revenue
@@ -122,13 +72,8 @@ def calculate_da_to_revenue(income_stmt: pd.DataFrame, cash_flow: pd.DataFrame) 
 
 def calculate_nwc_change_to_revenue(income_stmt: pd.DataFrame, cash_flow: pd.DataFrame) -> pd.Series:
     """
-    Change in Net Working Capital / Revenue.
-
-    Sign convention: yfinance's "Change In Working Capital" is already a
-    *cash-flow-statement* figure (positive = cash inflow from working
-    capital releasing, negative = cash tied up funding growth) — this
-    module preserves that sign so Day 3's FCFF formula can add it directly
-    rather than re-deriving the sign convention.
+    Change in net working capital / revenue. Keeps the cash-flow-statement
+    sign convention (positive = cash inflow) so fcff.py can just add it.
     """
     revenue = find_line_item(income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"])
     delta_nwc = find_line_item(cash_flow, ["Change In Working Capital", "Changes In Working Capital"])
@@ -136,32 +81,19 @@ def calculate_nwc_change_to_revenue(income_stmt: pd.DataFrame, cash_flow: pd.Dat
 
 
 def calculate_effective_tax_rate(income_stmt: pd.DataFrame) -> pd.Series:
-    """
-    Effective Tax Rate = Tax Provision / Pretax Income.
-
-    Used (rather than the 21% statutory rate) to NOPAT-ize EBIT, since it
-    reflects the company's actual historical cash tax burden including
-    credits, foreign mix, and other permanent differences.
-    """
+    """Tax Provision / Pretax Income — used instead of the statutory rate where available."""
     pretax_income = find_line_item(income_stmt, ["Pretax Income", "Income Before Tax"])
     tax_provision = find_line_item(income_stmt, ["Tax Provision", "Income Tax Expense"])
     return (tax_provision / pretax_income).replace([np.inf, -np.inf], np.nan)
 
 
-# ==============================================================================
-# 3. PER-TICKER METRICS BUNDLE
-# ==============================================================================
 def build_metrics_bundle(ticker: str, statements: dict[str, pd.DataFrame]) -> dict:
     """
-    Runs every metric function above for one ticker and packages:
-      - the full historical Series for each metric (for trend/QA review)
-      - guardrailed historical averages (used directly by Day 3's forecast)
-
-    Guardrails (`floor`/`cap`) exist because a single noisy year (e.g. a
-    one-off impairment or divestiture-driven working-capital swing) can
-    otherwise distort a 3-4 year average into an unusable forecast input —
-    standard practice is to bound ratios to a plausible operating range
-    rather than let outliers pass straight through.
+    Runs all the metric calcs for one ticker and returns both the full
+    historical series (for a sanity check) and floored/capped averages
+    (what the forecast actually uses). The floor/cap guards against a single
+    weird year — a one-off writedown or working-capital swing — skewing a
+    3-4 year average into something unusable.
     """
     income_stmt, cash_flow = statements["income_stmt"], statements["cash_flow"]
 
@@ -197,15 +129,8 @@ def build_metrics_bundle(ticker: str, statements: dict[str, pd.DataFrame]) -> di
     return {"ticker": ticker.upper(), "series": series, "averages": averages}
 
 
-# ==============================================================================
-# 4. TIDY / LONG-FORMAT TRANSFORM  (SQL-ready)
-# ==============================================================================
 def build_metrics_tidy(metrics_bundle: dict) -> pd.DataFrame:
-    """
-    Melts one ticker's metric Series dict into the long format:
-        ticker | period_end | metric_name | value
-    joinable to the Day-1 raw fact table on (ticker, period_end).
-    """
+    """Long format: ticker | period_end | metric_name | value. Joins to the raw facts table on ticker + period_end."""
     rows = []
     for metric_name, series in metrics_bundle["series"].items():
         for period_end, value in series.items():
@@ -224,18 +149,8 @@ def build_metrics_tidy(metrics_bundle: dict) -> pd.DataFrame:
     return df
 
 
-# ==============================================================================
-# 5. UNIVERSE-LEVEL ORCHESTRATION
-# ==============================================================================
 def build_metrics_universe(raw_wide_dict: dict[str, dict[str, pd.DataFrame]]) -> tuple[dict, pd.DataFrame]:
-    """
-    Runs the metrics pipeline across every ticker Day 1 successfully extracted.
-
-    Returns
-    -------
-    bundles_by_ticker : {ticker: metrics_bundle}  — consumed directly by Day 3 (FCFF)
-    metrics_tidy_df   : concatenated long-format table across the universe — SQL-ready
-    """
+    """Runs the metrics calc for every ticker extraction.py pulled and returns per-ticker bundles + one combined tidy table."""
     bundles_by_ticker, tidy_frames = {}, []
 
     for ticker, statements in raw_wide_dict.items():
@@ -248,14 +163,13 @@ def build_metrics_universe(raw_wide_dict: dict[str, dict[str, pd.DataFrame]]) ->
 
 
 if __name__ == "__main__":
-    # Standalone smoke test: `python metrics.py` (chains off extraction.py)
-    from config import UNIVERSE, PERIOD_TYPE
+    from config import PERIOD_TYPE, UNIVERSE
     from extraction import extract_universe
 
     _, _, raw_wide_dict = extract_universe(UNIVERSE, period_type=PERIOD_TYPE)
     bundles_by_ticker, metrics_tidy_df = build_metrics_universe(raw_wide_dict)
 
     for ticker, bundle in bundles_by_ticker.items():
-        print(f"\n--- {ticker}: Historical Average Metrics ---")
+        print(f"\n--- {ticker}: historical average metrics ---")
         for k, v in bundle["averages"].items():
             print(f"  {k:28s}: {v:>8.2%}")
