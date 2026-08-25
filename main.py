@@ -1,7 +1,44 @@
 """
-Entry point. Runs ingestion -> valuation -> export end to end for the
-target/peer universe defined below, then a Monte Carlo pass on top of the
-resulting forecast.
+Valuation engine — pulls company financials and builds a discounted cash
+flow model.
+
+Given a ticker and a list of peers, this fetches Income Statement, Balance
+Sheet, and Cash Flow data through yfinance (ingestion.py), works out
+historical margins and growth rates, projects Free Cash Flow to Firm (FCFF)
+five years out, and runs a Monte Carlo sensitivity check on top of the
+forecast (all in valuation.py). Results get written to a local SQLite
+database (export.py) as long/tidy tables, easy to query and easy to swap
+for a real Postgres instance later without touching the calculation code.
+
+FCFF = EBIT x (1 - tax rate) + D&A - CapEx + change in NWC
+
+FCFF is unlevered cash flow — before any debt or equity financing effects —
+so it gets discounted at WACC rather than cost of equity when building out
+the full DCF. WACC estimation, terminal value, and the enterprise-value-to-
+share-price bridge aren't built yet; the forecast table this produces feeds
+into that next.
+
+Usage:
+    pip install -r requirements.txt
+    python main.py
+
+Edit TARGET_TICKER and PEER_TICKERS below to run this on a different
+company. Each of ingestion.py and valuation.py can also be run standalone
+for a quick check (python ingestion.py, python valuation.py).
+
+Output tables (in mna_valuation.db):
+    company_profiles    one row per ticker — beta, market cap, sector
+    raw_financials       every line item, every period, every ticker
+    historical_metrics   the calculated ratios above, by period
+    fcff_actuals          reconstructed FCFF from reported numbers
+    fcff_forecast         the 5-year projection
+    risk_simulation       one row per Monte Carlo run — median/percentile/VaR
+
+Data comes from Yahoo Finance via yfinance, which is free but occasionally
+inconsistent — some tickers report line items under different labels, and a
+few smaller companies are missing fields entirely. Worth double-checking
+against the actual 10-K before trusting any output for real. Not investment
+advice.
 """
 
 from pathlib import Path
