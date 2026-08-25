@@ -4,8 +4,8 @@ target ticker plus its peer group, and reshapes it into a long/tidy format
 that's easy to load into a SQL table.
 
 Statements come back from yfinance as "wide" DataFrames — line items as rows,
-period dates as columns. That's fine for the actual math (metrics.py and
-valuation.py both use it directly), but it's a bad fit for a database table since
+period dates as columns. That's fine for the actual math (valuation.py uses
+it directly), but it's a bad fit for a database table since
 companies don't all report the same line items and yfinance's labels change
 between versions. So this module also melts everything into:
 
@@ -108,8 +108,8 @@ def extract_universe(
     stop the rest of the batch — it just gets logged and skipped.
 
     Returns company profiles, the combined tidy fact table (ready for SQL),
-    and a dict of the wide statements per ticker (what the metrics/fcff
-    modules actually calculate off of).
+    and a dict of the wide statements per ticker (what valuation.py actually
+    calculates off of).
     """
     profiles, tidy_frames = [], []
     raw_wide_dict: dict[str, dict[str, pd.DataFrame]] = {}
@@ -136,9 +136,10 @@ def extract_universe(
 
 
 if __name__ == "__main__":
-    from config import PERIOD_TYPE, UNIVERSE
+    # quick standalone check — real run configures tickers in main.py
+    test_universe = ["AAPL", "MSFT"]
 
-    profiles_df, raw_tidy_df, raw_wide_dict = extract_universe(UNIVERSE, period_type=PERIOD_TYPE)
+    profiles_df, raw_tidy_df, raw_wide_dict = extract_universe(test_universe, period_type="annual")
     print("\n--- Company Profiles ---")
     print(profiles_df)
     print(f"\n--- Tidy Fact Table: {len(raw_tidy_df):,} rows ---")

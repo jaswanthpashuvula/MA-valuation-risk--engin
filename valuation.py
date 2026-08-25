@@ -1,25 +1,183 @@
 """
-Free Cash Flow to Firm calculations — the formula itself plus a historical
-version (reconciles against reported statements, good sanity check) and a
-forecast version (5-year projection built on metrics.py's averages).
+All the valuation math lives here: historical margin/ratio calculations,
+the FCFF formula (applied to both actuals and a 5-year forecast), and a
+Monte Carlo sensitivity check on top of the forecast.
 
     FCFF = EBIT x (1 - tax rate) + D&A - CapEx + change in NWC
 
 FCFF is unlevered — cash available to both debt and equity holders before
 any financing effects — which is why it gets discounted at WACC rather than
 cost of equity on its own.
+
+find_line_item() is the one place that deals with yfinance's label drift
+(e.g. some tickers report "Capital Expenditure", others "Capital
+Expenditures"). Everything below goes through it instead of indexing a
+DataFrame with a hardcoded string, so a missing/renamed line item degrades
+to NaN for that one metric instead of crashing the whole run.
 """
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
 
-from metrics import find_line_item
+
+# ---------------------------------------------------------------------------
+# line-item lookup
+# ---------------------------------------------------------------------------
+def find_line_item(df: pd.DataFrame, aliases: list[str]) -> pd.Series:
+    """Looks up a row by trying each alias, case-insensitive, exact then substring match."""
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+
+    idx_lower = {str(i).lower(): i for i in df.index}
+
+    for alias in aliases:
+        if alias.lower() in idx_lower:
+            return df.loc[idx_lower[alias.lower()]].astype(float)
+
+    for alias in aliases:
+        for lower_label, original_label in idx_lower.items():
+            if alias.lower() in lower_label:
+                return df.loc[original_label].astype(float)
+
+    return pd.Series(np.nan, index=df.columns)
 
 
+# ---------------------------------------------------------------------------
+# historical margins / ratios
+# ---------------------------------------------------------------------------
+def calculate_revenue_growth(income_stmt: pd.DataFrame) -> pd.Series:
+    """YoY revenue growth — the main driver the forecast scales off of."""
+    revenue = find_line_item(income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"])
+    return revenue.pct_change()
+
+
+def calculate_ebitda_margin(income_stmt: pd.DataFrame, cash_flow: pd.DataFrame) -> pd.Series:
+    """EBITDA / Revenue. Falls back to EBIT + D&A if EBITDA isn't reported directly."""
+    revenue = find_line_item(income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"])
+    ebitda = find_line_item(income_stmt, ["EBITDA", "Normalized EBITDA"])
+
+    if ebitda.isna().all():
+        ebit = find_line_item(income_stmt, ["EBIT", "Operating Income"])
+        d_and_a = find_line_item(cash_flow, ["Depreciation And Amortization", "Depreciation Amortization Depletion"])
+        ebitda = ebit.add(d_and_a, fill_value=0)
+
+    return ebitda / revenue
+
+
+def calculate_capex_to_revenue(income_stmt: pd.DataFrame, cash_flow: pd.DataFrame) -> pd.Series:
+    """CapEx / Revenue. yfinance reports CapEx as a negative cash outflow, so take abs()."""
+    revenue = find_line_item(income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"])
+    capex = find_line_item(cash_flow, ["Capital Expenditure", "Capital Expenditures", "Purchase Of PPE"])
+    return capex.abs() / revenue
+
+
+def calculate_da_to_revenue(income_stmt: pd.DataFrame, cash_flow: pd.DataFrame) -> pd.Series:
+    """D&A / Revenue — used both for the EBITDA->EBIT bridge and the FCFF add-back."""
+    revenue = find_line_item(income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"])
+    d_and_a = find_line_item(cash_flow, ["Depreciation And Amortization", "Depreciation Amortization Depletion"])
+    return d_and_a / revenue
+
+
+def calculate_nwc_change_to_revenue(income_stmt: pd.DataFrame, cash_flow: pd.DataFrame) -> pd.Series:
+    """
+    Change in net working capital / revenue. Keeps the cash-flow-statement
+    sign convention (positive = cash inflow) so the FCFF formula can just add it.
+    """
+    revenue = find_line_item(income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"])
+    delta_nwc = find_line_item(cash_flow, ["Change In Working Capital", "Changes In Working Capital"])
+    return delta_nwc / revenue
+
+
+def calculate_effective_tax_rate(income_stmt: pd.DataFrame) -> pd.Series:
+    """Tax Provision / Pretax Income — used instead of the statutory rate where available."""
+    pretax_income = find_line_item(income_stmt, ["Pretax Income", "Income Before Tax"])
+    tax_provision = find_line_item(income_stmt, ["Tax Provision", "Income Tax Expense"])
+    return (tax_provision / pretax_income).replace([np.inf, -np.inf], np.nan)
+
+
+def build_metrics_bundle(ticker: str, statements: dict[str, pd.DataFrame]) -> dict:
+    """
+    Runs all the metric calcs for one ticker and returns both the full
+    historical series (for a sanity check) and floored/capped averages
+    (what the forecast actually uses). The floor/cap guards against a single
+    weird year — a one-off writedown or working-capital swing — skewing a
+    3-4 year average into something unusable.
+    """
+    income_stmt, cash_flow = statements["income_stmt"], statements["cash_flow"]
+
+    series = {
+        "revenue_growth": calculate_revenue_growth(income_stmt),
+        "ebitda_margin": calculate_ebitda_margin(income_stmt, cash_flow),
+        "capex_to_revenue": calculate_capex_to_revenue(income_stmt, cash_flow),
+        "da_to_revenue": calculate_da_to_revenue(income_stmt, cash_flow),
+        "nwc_change_to_revenue": calculate_nwc_change_to_revenue(income_stmt, cash_flow),
+        "effective_tax_rate": calculate_effective_tax_rate(income_stmt),
+    }
+
+    def _safe_mean(s: pd.Series, floor=None, cap=None, fallback=0.0) -> float:
+        clean = s.replace([np.inf, -np.inf], np.nan).dropna()
+        if clean.empty:
+            return fallback
+        val = float(clean.mean())
+        if floor is not None:
+            val = max(val, floor)
+        if cap is not None:
+            val = min(val, cap)
+        return val
+
+    averages = {
+        "avg_revenue_growth": _safe_mean(series["revenue_growth"], floor=-0.20, cap=0.60),
+        "avg_ebitda_margin": _safe_mean(series["ebitda_margin"], floor=0.0, cap=0.80),
+        "avg_capex_to_revenue": _safe_mean(series["capex_to_revenue"], floor=0.0, cap=0.50),
+        "avg_da_to_revenue": _safe_mean(series["da_to_revenue"], floor=0.0, cap=0.50),
+        "avg_nwc_change_to_revenue": _safe_mean(series["nwc_change_to_revenue"], floor=-0.30, cap=0.30),
+        "avg_tax_rate": _safe_mean(series["effective_tax_rate"], floor=0.0, cap=0.45, fallback=0.21),
+    }
+
+    return {"ticker": ticker.upper(), "series": series, "averages": averages}
+
+
+def build_metrics_tidy(metrics_bundle: dict) -> pd.DataFrame:
+    """Long format: ticker | period_end | metric_name | value."""
+    rows = []
+    for metric_name, series in metrics_bundle["series"].items():
+        for period_end, value in series.items():
+            if pd.isna(value):
+                continue
+            rows.append(
+                {
+                    "ticker": metrics_bundle["ticker"],
+                    "period_end": pd.to_datetime(period_end).date(),
+                    "metric_name": metric_name,
+                    "value": float(value),
+                }
+            )
+    df = pd.DataFrame(rows)
+    df["extraction_timestamp"] = datetime.now(timezone.utc).isoformat()
+    return df
+
+
+def build_metrics_universe(raw_wide_dict: dict[str, dict[str, pd.DataFrame]]) -> tuple[dict, pd.DataFrame]:
+    """Runs the metrics calc for every ticker ingestion.py pulled and returns per-ticker bundles + one combined tidy table."""
+    bundles_by_ticker, tidy_frames = {}, []
+
+    for ticker, statements in raw_wide_dict.items():
+        bundle = build_metrics_bundle(ticker, statements)
+        bundles_by_ticker[ticker] = bundle
+        tidy_frames.append(build_metrics_tidy(bundle))
+
+    metrics_tidy_df = pd.concat(tidy_frames, ignore_index=True) if tidy_frames else pd.DataFrame()
+    return bundles_by_ticker, metrics_tidy_df
+
+
+# ---------------------------------------------------------------------------
+# FCFF — historical reconciliation + forecast
+# ---------------------------------------------------------------------------
 def calculate_nopat(ebit: float | pd.Series, tax_rate: float | pd.Series) -> float | pd.Series:
     """NOPAT = EBIT x (1 - tax rate)."""
     return ebit * (1 - tax_rate)
@@ -156,12 +314,79 @@ def build_fcff_universe(
     return hist_tidy_df, forecast_tidy_df
 
 
-if __name__ == "__main__":
-    from config import PERIOD_TYPE, PROJECTION_YEARS, UNIVERSE
-    from ingestion import extract_universe
-    from metrics import build_metrics_universe
+# ---------------------------------------------------------------------------
+# Monte Carlo sensitivity check
+# ---------------------------------------------------------------------------
+def get_avg_forecast_fcff(ticker: str, db_path) -> float:
+    """Average forecasted FCFF for a ticker, pulled from the fcff_forecast table export.py writes."""
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT AVG(value) FROM fcff_forecast WHERE ticker = ? AND line_item = 'FCFF'",
+            (ticker.upper(),),
+        ).fetchone()
+    finally:
+        conn.close()
 
-    _, _, raw_wide_dict = extract_universe(UNIVERSE, period_type=PERIOD_TYPE)
+    if not row or row[0] is None:
+        raise ValueError(
+            f"No forecast FCFF found for '{ticker}' in {db_path}. Run main.py first."
+        )
+    return float(row[0])
+
+
+def run_monte_carlo(
+    ticker: str,
+    db_path,
+    iterations: int = 10000,
+    growth_mean: float = 0.04,
+    growth_std: float = 0.015,
+    wacc_mean: float = 0.095,
+    wacc_std: float = 0.01,
+    seed: int | None = None,
+) -> dict:
+    """
+    Runs a Gordon-growth valuation `iterations` times with randomized growth
+    and WACC each pass, rather than one fixed scenario. seed is left as None
+    by default on purpose — a fixed seed would make every run produce the
+    identical result, defeating the point of a stochastic simulation. Pass a
+    seed explicitly if you need a reproducible run for testing.
+    """
+    baseline_fcff = get_avg_forecast_fcff(ticker, db_path)
+
+    rng = np.random.default_rng(seed)
+    simulated_growth = rng.normal(growth_mean, growth_std, iterations)
+    simulated_wacc = np.clip(rng.normal(wacc_mean, wacc_std, iterations), 0.01, None)
+
+    # keep the denominator away from zero/negative when a draw puts WACC below growth
+    spread = np.clip(simulated_wacc - simulated_growth, 0.005, None)
+    valuations = np.clip(baseline_fcff * (1 + simulated_growth) / spread, 0, None)
+
+    results = {
+        "ticker": ticker.upper(),
+        "iterations": iterations,
+        "baseline_fcff": baseline_fcff,
+        "median_valuation": float(np.percentile(valuations, 50)),
+        "p25_valuation": float(np.percentile(valuations, 25)),
+        "p75_valuation": float(np.percentile(valuations, 75)),
+        "var_95": float(np.percentile(valuations, 5)),
+    }
+
+    print(f"Ran {iterations:,} simulation paths for {results['ticker']}")
+    print(f"  Baseline forecast FCFF : {baseline_fcff:,.0f}")
+    print(f"  Median valuation       : {results['median_valuation']:,.0f}")
+    print(f"  25th / 75th percentile : {results['p25_valuation']:,.0f} / {results['p75_valuation']:,.0f}")
+    print(f"  5th percentile (VaR)   : {results['var_95']:,.0f}")
+
+    return results
+
+
+if __name__ == "__main__":
+    # quick standalone check — real run is driven from main.py
+    from ingestion import extract_universe
+
+    test_universe = ["AAPL", "MSFT"]
+    _, _, raw_wide_dict = extract_universe(test_universe, period_type="annual")
     bundles_by_ticker, _ = build_metrics_universe(raw_wide_dict)
 
     for ticker, statements in raw_wide_dict.items():
@@ -171,6 +396,6 @@ if __name__ == "__main__":
         print(hist_df[["ebit", "d_and_a", "capex", "delta_nwc", "fcff"]])
 
         revenue = find_line_item(statements["income_stmt"], ["Total Revenue"])
-        forecast_df = project_fcff(revenue.dropna().iloc[-1], bundle["averages"], years=PROJECTION_YEARS)
+        forecast_df = project_fcff(revenue.dropna().iloc[-1], bundle["averages"], years=5)
         print(f"\n--- {ticker}: 5-year FCFF forecast ---")
         print(forecast_df[["Revenue", "EBITDA", "EBIT", "NOPAT", "CapEx", "FCFF"]])
