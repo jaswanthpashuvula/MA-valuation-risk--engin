@@ -11,6 +11,7 @@ I put this together to practice building something closer to how a valuation mod
 - `metrics.py` — revenue growth, EBITDA margin, CapEx/revenue, D&A/revenue, working capital swings, effective tax rate
 - `fcff.py` — the FCFF formula, applied both to historical actuals (as a sanity check) and to the 5-year forecast
 - `pipeline.py` — runs all of the above and loads the results into SQLite
+- `risk_simulation.py` — Monte Carlo sensitivity check on top of the forecast (see below)
 
 ## Getting started
 
@@ -31,6 +32,14 @@ FCFF = EBIT x (1 - tax rate) + D&A - CapEx + change in NWC
 
 FCFF is unlevered cash flow — before any debt or equity financing effects — so it gets discounted at WACC rather than cost of equity when building out the full DCF.
 
+## Risk simulation
+
+A single DCF gives you one number for one set of growth/WACC assumptions, which isn't very informative on its own — `risk_simulation.py` runs the valuation a few thousand times instead, drawing growth and WACC from a normal distribution each pass, and reports the spread (median, 25th/75th percentile, and a rough 95% Value-at-Risk). It pulls the average forecasted FCFF for whichever ticker is set in `config.py` straight out of the `fcff_forecast` table, so it reflects the actual pipeline output rather than a fixed number:
+
+```bash
+python risk_simulation.py
+```
+
 ## Output tables
 
 Everything gets written to a SQLite file (`mna_valuation.db`) as long/tidy tables, which made it easy to query and also easy to swap for a real Postgres instance later without touching the calculation code:
@@ -42,6 +51,7 @@ Everything gets written to a SQLite file (`mna_valuation.db`) as long/tidy table
 | `historical_metrics` | the calculated ratios above, by period |
 | `fcff_actuals` | reconstructed FCFF from reported numbers |
 | `fcff_forecast` | the 5-year projection |
+| `risk_simulation` | one row per Monte Carlo run — median/percentile/VaR valuation estimates |
 
 ## What's not done yet
 
