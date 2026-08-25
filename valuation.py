@@ -344,6 +344,7 @@ def run_monte_carlo(
     wacc_mean: float = 0.095,
     wacc_std: float = 0.01,
     seed: int | None = None,
+    return_distribution: bool = False,
 ) -> dict:
     """
     Runs a Gordon-growth valuation `iterations` times with randomized growth
@@ -351,6 +352,11 @@ def run_monte_carlo(
     by default on purpose — a fixed seed would make every run produce the
     identical result, defeating the point of a stochastic simulation. Pass a
     seed explicitly if you need a reproducible run for testing.
+
+    return_distribution=True adds the full array of simulated valuations to
+    the result under "distribution" — visualize.py uses it to plot the
+    histogram. export.append_risk_result() strips that key back out before
+    writing the row to SQL, since a 10,000-element array isn't a SQL cell.
     """
     baseline_fcff = get_avg_forecast_fcff(ticker, db_path)
 
@@ -377,6 +383,9 @@ def run_monte_carlo(
     print(f"  Median valuation       : {results['median_valuation']:,.0f}")
     print(f"  25th / 75th percentile : {results['p25_valuation']:,.0f} / {results['p75_valuation']:,.0f}")
     print(f"  5th percentile (VaR)   : {results['var_95']:,.0f}")
+
+    if return_distribution:
+        results["distribution"] = valuations
 
     return results
 

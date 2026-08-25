@@ -31,7 +31,14 @@ def load_tables(tables: dict[str, pd.DataFrame], db_path) -> None:
 
 
 def append_risk_result(result: dict, db_path) -> None:
-    """Appends one Monte Carlo run to the risk_simulation table instead of overwriting it, so history builds up run over run."""
+    """
+    Appends one Monte Carlo run to the risk_simulation table instead of
+    overwriting it, so history builds up run over run. If the result carries
+    a "distribution" array (run_monte_carlo(..., return_distribution=True),
+    used for the chart in visualize.py), it's dropped here — a 10,000-element
+    array isn't a SQL cell.
+    """
+    result = {k: v for k, v in result.items() if k != "distribution"}
     row = pd.DataFrame([{**result, "run_timestamp": datetime.now(timezone.utc).isoformat()}])
     conn = get_connection(db_path)
     try:

@@ -9,6 +9,8 @@ five years out, and runs a Monte Carlo sensitivity check on top of the
 forecast (all in valuation.py). Results get written to a local SQLite
 database (export.py) as long/tidy tables, easy to query and easy to swap
 for a real Postgres instance later without touching the calculation code.
+A final step (visualize.py) turns the forecast and the Monte Carlo run into
+three charts under output/charts/.
 
 FCFF = EBIT x (1 - tax rate) + D&A - CapEx + change in NWC
 
@@ -34,6 +36,13 @@ Output tables (in mna_valuation.db):
     fcff_forecast         the 5-year projection
     risk_simulation       one row per Monte Carlo run — median/percentile/VaR
 
+Output charts (in output/charts/):
+    {ticker}_fcff_forecast.png   revenue + FCFF trajectory over the forecast
+    {ticker}_monte_carlo.png     distribution of the Monte Carlo runs, with
+                                  median / IQR / 5th-pct VaR marked
+    peer_comparison.png          growth, margin, and CapEx intensity across
+                                  the whole ticker universe
+
 Data comes from Yahoo Finance via yfinance, which is free but occasionally
 inconsistent — some tickers report line items under different labels, and a
 few smaller companies are missing fields entirely. Worth double-checking
@@ -46,6 +55,7 @@ from pathlib import Path
 from ingestion import extract_universe
 from valuation import build_fcff_universe, build_metrics_universe, run_monte_carlo
 import export
+import visualize
 
 # --- target company + peer group -------------------------------------------
 TARGET_TICKER = "AAPL"
@@ -57,6 +67,7 @@ PROJECTION_YEARS = 5
 MONTE_CARLO_ITERATIONS = 10000
 
 DB_PATH = Path(__file__).parent / "mna_valuation.db"
+CHARTS_DIR = Path(__file__).parent / "output" / "charts"
 
 
 def run_pipeline(tickers=UNIVERSE, period_type=PERIOD_TYPE, years=PROJECTION_YEARS):
@@ -94,8 +105,20 @@ def run_pipeline(tickers=UNIVERSE, period_type=PERIOD_TYPE, years=PROJECTION_YEA
     )
 
     print(f"\nRunning Monte Carlo sensitivity check for {TARGET_TICKER}...")
-    risk_result = run_monte_carlo(TARGET_TICKER, DB_PATH, iterations=MONTE_CARLO_ITERATIONS)
+    risk_result = run_monte_carlo(
+        TARGET_TICKER, DB_PATH, iterations=MONTE_CARLO_ITERATIONS, return_distribution=True
+    )
     export.append_risk_result(risk_result, DB_PATH)
+
+    print(f"\nGenerating charts ({CHARTS_DIR})...")
+    chart_paths = visualize.generate_all_charts(
+        TARGET_TICKER,
+        bundles_by_ticker,
+        forecast_fcff_tidy_df,
+        risk_result,
+        risk_result["distribution"],
+        CHARTS_DIR,
+    )
 
     return {
         "profiles_df": profiles_df,
@@ -106,6 +129,7 @@ def run_pipeline(tickers=UNIVERSE, period_type=PERIOD_TYPE, years=PROJECTION_YEA
         "hist_fcff_tidy_df": hist_fcff_tidy_df,
         "forecast_fcff_tidy_df": forecast_fcff_tidy_df,
         "risk_result": risk_result,
+        "chart_paths": chart_paths,
     }
 
 
