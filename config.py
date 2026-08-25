@@ -1,6 +1,6 @@
 """
 Run parameters for the valuation pipeline. Keeping these in one place means
-extraction.py, metrics.py, fcff.py, and pipeline.py never hardcode a ticker
+ingestion.py, metrics.py, valuation.py, and main.py never hardcode a ticker
 or assumption directly.
 """
 
@@ -22,7 +22,7 @@ TERMINAL_GROWTH_RATE: float = 0.025    # perpetuity growth rate for the terminal
 PROJECTION_YEARS: int = 5
 
 # Using SQLite for now so the project runs with zero setup. To point this at
-# Postgres/MySQL instead, just swap the connection in pipeline.py's
+# Postgres/MySQL instead, just swap the connection in main.py's
 # get_sql_engine() — everything else writes plain DataFrames via to_sql and
 # doesn't care what's on the other end.
 DB_PATH: Path = Path(__file__).parent / "mna_valuation.db"

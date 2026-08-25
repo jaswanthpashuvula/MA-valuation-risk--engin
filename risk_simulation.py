@@ -5,7 +5,7 @@ thousand times and looks at the resulting spread of valuations — gives a
 sense of how sensitive the number actually is to those assumptions, plus a
 rough 95% Value-at-Risk estimate.
 
-Pulls its baseline straight from the fcff_forecast table pipeline.py writes,
+Pulls its baseline straight from the fcff_forecast table main.py writes,
 so it reflects whatever ticker config.py is pointed at rather than a fixed
 number.
 """
@@ -34,7 +34,7 @@ def get_avg_forecast_fcff(ticker: str, db_path=DB_PATH) -> float:
 
     if not row or row[0] is None:
         raise ValueError(
-            f"No forecast FCFF found for '{ticker}' in {db_path}. Run pipeline.py first."
+            f"No forecast FCFF found for '{ticker}' in {db_path}. Run main.py first."
         )
     return float(row[0])
 

@@ -7,22 +7,22 @@ I put this together to practice building something closer to how a valuation mod
 ## Structure
 
 - `config.py` — tickers and valuation assumptions live here
-- `extraction.py` — pulls the three statements from yfinance for a target + peer group
+- `ingestion.py` — pulls the three statements from yfinance for a target + peer group
 - `metrics.py` — revenue growth, EBITDA margin, CapEx/revenue, D&A/revenue, working capital swings, effective tax rate
-- `fcff.py` — the FCFF formula, applied both to historical actuals (as a sanity check) and to the 5-year forecast
-- `pipeline.py` — runs all of the above and loads the results into SQLite
+- `valuation.py` — the FCFF formula, applied both to historical actuals (as a sanity check) and to the 5-year forecast
+- `main.py` — runs all of the above and loads the results into SQLite
 - `risk_simulation.py` — Monte Carlo sensitivity check on top of the forecast (see below)
 
 ## Getting started
 
 ```bash
 pip install -r requirements.txt
-python pipeline.py
+python main.py
 ```
 
 Edit `TARGET_TICKER` and `PEER_TICKERS` in `config.py` first if you want to run it on something other than AAPL/MSFT/GOOGL/DELL.
 
-Each file can also be run on its own for testing (`python extraction.py`, etc.).
+Each file can also be run on its own for testing (`python ingestion.py`, etc.).
 
 ## FCFF formula
 

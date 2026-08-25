@@ -1,7 +1,7 @@
 """
 Historical margin/ratio calculations — revenue growth, EBITDA margin, CapEx
 intensity, D&A intensity, working capital swings, and effective tax rate —
-built from the wide statements extraction.py returns.
+built from the wide statements ingestion.py returns.
 
 find_line_item() is the one place that deals with yfinance's label drift
 (e.g. some tickers report "Capital Expenditure", others "Capital
@@ -73,7 +73,7 @@ def calculate_da_to_revenue(income_stmt: pd.DataFrame, cash_flow: pd.DataFrame) 
 def calculate_nwc_change_to_revenue(income_stmt: pd.DataFrame, cash_flow: pd.DataFrame) -> pd.Series:
     """
     Change in net working capital / revenue. Keeps the cash-flow-statement
-    sign convention (positive = cash inflow) so fcff.py can just add it.
+    sign convention (positive = cash inflow) so valuation.py can just add it.
     """
     revenue = find_line_item(income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"])
     delta_nwc = find_line_item(cash_flow, ["Change In Working Capital", "Changes In Working Capital"])
@@ -150,7 +150,7 @@ def build_metrics_tidy(metrics_bundle: dict) -> pd.DataFrame:
 
 
 def build_metrics_universe(raw_wide_dict: dict[str, dict[str, pd.DataFrame]]) -> tuple[dict, pd.DataFrame]:
-    """Runs the metrics calc for every ticker extraction.py pulled and returns per-ticker bundles + one combined tidy table."""
+    """Runs the metrics calc for every ticker ingestion.py pulled and returns per-ticker bundles + one combined tidy table."""
     bundles_by_ticker, tidy_frames = {}, []
 
     for ticker, statements in raw_wide_dict.items():
@@ -164,7 +164,7 @@ def build_metrics_universe(raw_wide_dict: dict[str, dict[str, pd.DataFrame]]) ->
 
 if __name__ == "__main__":
     from config import PERIOD_TYPE, UNIVERSE
-    from extraction import extract_universe
+    from ingestion import extract_universe
 
     _, _, raw_wide_dict = extract_universe(UNIVERSE, period_type=PERIOD_TYPE)
     bundles_by_ticker, metrics_tidy_df = build_metrics_universe(raw_wide_dict)
