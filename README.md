@@ -1,79 +1,95 @@
-# Valuation Engine
+# M&A valuation and diligence checker
 
-A Python pipeline for pulling company financials and building a discounted cash flow model. Given a ticker and a list of peers, it fetches Income Statement, Balance Sheet, and Cash Flow data through `yfinance`, works out historical margins and growth rates, projects Free Cash Flow to Firm (FCFF) five years out, and runs a Monte Carlo sensitivity check on top of the forecast — then turns the whole thing into charts instead of leaving it as rows in a database.
+Two parts in one repo. The first is a deal diligence checker: point it at a folder of deal documents and it lists the numbers that don't agree across the management deck, the audited statements and the operating model, with the exact slide, page or cell behind each one and a question to put to management. The second is the valuation pipeline I built first: pull public financials, project free cash flow, run a Monte Carlo on the result.
 
-I put this together to practice building something closer to how a valuation model would actually get assembled at a bank or in equity research — separate stages for data ingestion, valuation math, and output, with results that land in a database instead of just printing to a terminal.
+I'm a student from a small town and I built this to learn how analysts actually work through a deal, not to compete with commercial tools. The diligence checker came from one specific, boring problem: reconciling a deck against the statements by hand.
 
-## What it produces
+## Diligence checker
 
-Every run of `main.py` ends by generating three charts from the pipeline's own output tables (`visualize.py` handles this, no manual plotting). These are real, regenerable output — run it against any ticker and they get rebuilt from scratch.
+```
+python sample_deal/make_deal.py sample_deal --seed 7
+python dealcheck.py sample_deal
+```
 
-**5-year revenue & FCFF forecast**
+On the included fictional company (Halden Precision Components, invented data) it finds all six problems I planted, for example:
+
+> Deck shows EBITDA of $17.3M for FY2024 (slide 2) but the audited statements give $15.5M (operating income p.2 + D&A p.4). What explains the gap? Ask for the EBITDA reconciliation from operating income and every add-back with support.
+
+Full output is in `output/diligence/`: `report.md` (readable), `findings.csv`, `scenario_summary.png`, `audit_log.jsonl`.
+
+What it does:
+
+- Reads a .pptx deck, a .pdf set of statements and an .xlsx model, and records every figure with its file and location (slide, page, sheet and cell).
+- Treats audited statements as the reference, then the model, then the deck. Where a document only gives the pieces, it derives EBITDA (operating income plus D&A), net debt and gross margin and cites the components.
+- Flags three kinds of problem: a figure that disagrees with a higher-ranked document, a deck claim nothing else supports (for example ARR), and a document that contradicts itself (segment notes that don't add to revenue, a stated margin that doesn't match its own EBITDA and revenue).
+- Allows for rounding. A deck showing $98M against $98.4M in the statements is not flagged.
+- Turns each finding into a follow-up question, tailored by metric.
+- Lets an analyst correct a misread number with an overrides file (`--overrides overrides.csv`, columns `doc,metric,period,value,reason,analyst`). Overrides are applied, marked in the report and written to the audit log.
+- Keeps an append-only, hash-chained log of each run with SHA-256 of every input file, so a result can be tied to the exact documents it came from.
+- Shows what the gap is worth: a small five-year DCF on audited numbers versus the deck's numbers, and a growth by WACC grid. WACC, terminal growth and the margin path are assumptions, not forecasts.
+
+### How accurate is it
+
+`eval_checker.py` generates synthetic deal rooms with a random mix of ten planted problems, runs the checker, and counts a flag as correct if kind, metric and period match something planted.
+
+| Test | Deals | Planted | Missed | False flags |
+|---|---|---|---|---|
+| Default | 200 | 1,014 | 0 | 0 |
+| Hard (other label wording, gaps of 1 to 3%, correct rounded figures as decoys) | 200 | 1,014 | 0 | 0 |
+
+Read this carefully: I wrote the generator and the checker, and the generator makes documents laid out the way the extractor expects. 100% here shows the logic works, not that it will work on a real data room. The honest number is the one I don't have yet, which is how it does on real, messy documents.
+
+### Limits
+
+- Synthetic data only. No real company documents have been used.
+- Extraction is label and regex based. Different layouts, merged cells, footnoted figures, scanned PDFs (no OCR) and spreadsheets with formulas that have no cached values will be missed or misread. "No finding" does not mean "checked".
+- It matches figures by metric and period. It does not understand adjusted versus reported definitions; that is what the follow-up questions are for.
+- The valuation scenarios are deliberately simple and are not an opinion on what a company is worth.
+- It is a tool for an analyst to look at, not something that decides anything.
+
+### Using it on a live deal
+
+Not without a firm's own controls. Running locally is not the same as being approved. At minimum that means sign-off from the firm's security and compliance teams, access limited to people on the deal, encryption at rest, a firm-approved environment, and review of the audit log. The hash-chained log here is a starting point, not a replacement for any of that. The diligence checker makes no network calls and has no LLM in the checking path: the questions are templates.
+
+## Valuation pipeline
+
+A Python pipeline that pulls Income Statement, Balance Sheet and Cash Flow data through yfinance for a target and peers, works out historical margins and growth, projects free cash flow to the firm five years out, and runs a Monte Carlo on growth and WACC.
+
+```
+pip install -r requirements.txt
+python main.py
+```
+
+Set `TARGET_TICKER` and `PEER_TICKERS` at the top of `main.py` first. Charts land in `output/charts/`.
 
 ![FCFF forecast](output/charts/aapl_fcff_forecast.png)
 
-Revenue and FCFF projected five years out, holding historical margins at their averages. Bars are revenue, the line is FCFF — shows how much of top-line growth actually turns into free cash.
-
-**Monte Carlo valuation spread**
+Revenue and FCFF five years out, holding historical margins at their averages.
 
 ![Monte Carlo distribution](output/charts/aapl_monte_carlo.png)
 
-A single DCF gives you one valuation for one guess at growth and WACC. This runs the Gordon-growth valuation 10,000 times instead, drawing growth and WACC from a normal distribution each pass, and plots the spread — median, 25th/75th percentile, and a rough 5% Value-at-Risk. (View is clipped at the 99th percentile since the tail runs long whenever a draw puts WACC close to growth — the stats themselves reflect the full distribution.)
-
-**Peer comparison**
+10,000 Gordon-growth valuations with growth and WACC drawn from normal distributions. Shows median, 25th and 75th percentile and a rough 5% value at risk. The view is clipped at the 99th percentile because the tail runs long when a draw puts WACC near growth.
 
 ![Peer comparison](output/charts/peer_comparison.png)
 
-Revenue growth, EBITDA margin, and CapEx intensity side by side across the ticker universe — a sanity check on whether one company's forecast assumptions look reasonable next to its peers.
+Revenue growth, EBITDA margin and capex intensity across the ticker set.
 
-## Structure
+FCFF = EBIT x (1 - tax rate) + D&A - CapEx + change in NWC
 
-- `main.py` — entry point; tickers and assumptions live here, and it orchestrates the other modules
-- - `ingestion.py` — pulls Income Statement, Balance Sheet, and Cash Flow data from yfinance for a target + peer group
-  - - `valuation.py` — the valuation math: historical margins (revenue growth, EBITDA margin, CapEx/revenue, D&A/revenue, working capital swings, tax rate), the FCFF formula applied to both historical actuals and a 5-year forecast, and a Monte Carlo sensitivity check
-    - - `export.py` — writes the resulting tables to SQLite
-      - - `visualize.py` — turns the forecast and Monte Carlo output into the charts above
-       
-        - ## Getting started
-       
-        - ```bash
-          pip install -r requirements.txt
-          python main.py
-          ```
+Files: `main.py` (entry point and assumptions), `ingestion.py`, `valuation.py`, `export.py` (writes tidy tables to SQLite), `visualize.py`.
 
-          Edit `TARGET_TICKER` and `PEER_TICKERS` at the top of `main.py` first if you want to run it on something other than AAPL/MSFT/GOOGL/DELL. Charts land in `output/charts/`.
+Yahoo Finance data is free but inconsistent, and some tickers label line items differently, so check against the 10-K before trusting an output. Not investment advice.
 
-          Each module can also be run on its own for testing (`python ingestion.py`, `python valuation.py`).
+## Not built yet
 
-          ## FCFF formula
+Proper WACC estimation, a trading comps cross-check, support for messier real-world documents, and testing on real (permitted) deal documents.
 
-          ```
-          FCFF = EBIT x (1 - tax rate) + D&A - CapEx + change in NWC
-          ```
+## Layout
 
-          FCFF is unlevered cash flow — before any debt or equity financing effects — so it gets discounted at WACC rather than cost of equity when building out the full DCF.
-
-          ## Output tables
-
-          Everything gets written to a SQLite file (`mna_valuation.db`) as long/tidy tables, which made it easy to query and also easy to swap for a real Postgres instance later without touching the calculation code:
-
-          | Table | What's in it |
-          |---|---|
-          | `company_profiles` | one row per ticker — beta, market cap, sector |
-          | `raw_financials` | every line item, every period, every ticker |
-          | `historical_metrics` | the calculated ratios above, by period |
-          | `fcff_actuals` | reconstructed FCFF from reported numbers |
-          | `fcff_forecast` | the 5-year projection |
-          | `risk_simulation` | one row per Monte Carlo run — median/percentile/VaR valuation estimates |
-
-          ## Why this over just a spreadsheet DCF
-
-          Most DCF templates are one static case. This treats growth and WACC as distributions instead of point guesses, and keeps ingestion / valuation math / output as separate modules so the assumptions are easy to swap without touching the calculation logic.
-
-          ## What's not done yet
-
-          WACC estimation, terminal value, and the enterprise-value-to-share-price bridge aren't built yet — the forecast table this produces is meant to feed into that next. Also on the list: sensitivity tables and a proper trading comps cross-check against the peer set.
-
-          ## Notes
-
-          Data comes from Yahoo Finance via yfinance, which is free but occasionally inconsistent — some tickers report line items under different labels, and a few smaller companies are missing fields entirely. Worth double-checking against the actual 10-K before trusting any output for real. Not investment advice, obviously.
+```
+dealcheck.py          run the diligence check
+eval_checker.py       accuracy test on synthetic deals
+diligence/            extract, reconcile, report, scenarios, audit
+sample_deal/          synthetic deal room and its generator
+main.py ...           valuation pipeline
+```
