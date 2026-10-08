@@ -1,5 +1,5 @@
 """
-Scores the checker against synthetic deal rooms where the planted problems are
+Scores the checker against synthetic Indian deal rooms where the planted problems are
 known. A flag counts as correct if (kind, metric, period) matches a planted one.
 
     python eval_checker.py --n 100
@@ -14,14 +14,14 @@ from diligence import extract, reconcile
 from sample_deal.make_deal import ISSUES, build
 
 
-def run(n=100, start=1000, hard=False):
+def run(n=100, start=1000, hard=False, clean=False):
     tp = fp = fn = 0
     by_issue = Counter()
     seen_issue = Counter()
     wrong = []
     for seed in range(start, start + n):
         with tempfile.TemporaryDirectory() as tmp:
-            planted = build(tmp, seed, hard=hard)
+            planted = build(tmp, seed, issues=[] if clean else None, hard=hard)
             facts, _ = extract.read_deal_room(tmp)
             _, findings = reconcile.run_checks(facts)
         truth = {(t["kind"], t["metric"], t["period"]): t["issue"] for t in planted}
@@ -49,12 +49,16 @@ if __name__ == "__main__":
     ap.add_argument("--n", type=int, default=100)
     ap.add_argument("--start", type=int, default=1000)
     ap.add_argument("--hard", action="store_true")
+    ap.add_argument("--clean", action="store_true", help="deals with nothing planted; any flag is a false flag")
     ap.add_argument("--out")
     a = ap.parse_args()
-    res = run(a.n, a.start, a.hard)
+    res = run(a.n, a.start, a.hard, a.clean)
     print(f"{res['deals']} deals, {res['planted']} planted issues, {res['flags']} flags")
-    print(f"precision {res['precision']:.3f}  recall {res['recall']:.3f}  "
-          f"(missed {res['missed']}, false flags {res['false_flags']})")
+    if res["planted"]:
+        print(f"precision {res['precision']:.3f}  recall {res['recall']:.3f}  "
+              f"(missed {res['missed']}, false flags {res['false_flags']})")
+    else:
+        print(f"false flags on deals with nothing planted: {res['false_flags']}")
     for k, v in res["by_issue"].items():
         print(f"  {k:18} {v}")
     for e in res["errors"][:20]:

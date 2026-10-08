@@ -1,14 +1,15 @@
 """
-Checks a folder of deal documents for numbers that disagree across the deck,
-the audited statements and the model, and writes a report with the source of
-every claim.
+Checks a folder of Indian deal documents (management deck, audited Ind AS
+statements, operating model) for numbers that disagree, and writes a report
+with the source of every claim.
 
     python dealcheck.py sample_deal
     python dealcheck.py sample_deal --overrides overrides.csv --out output/diligence
 
-overrides.csv (optional): doc,metric,period,value,reason,analyst
-  value is dollars for money, percentage points for ratios. Use it when the
-  extractor read a number wrong; the override is written to the audit log.
+overrides.csv (optional): doc,metric,period,value,unit,reason,analyst
+  doc is deck/audited/model, period like FY2024, unit is crore, lakh, inr or pct
+  (blank means crore for money). Use it when the extractor read a number wrong;
+  the override is written to the audit log.
 """
 import argparse
 import csv
@@ -17,16 +18,20 @@ from pathlib import Path
 from diligence import audit, extract, reconcile, report, scenarios
 
 
+UNITS = {"crore": 1e7, "cr": 1e7, "lakh": 1e5, "inr": 1.0, "": 1e7}
+
+
 def apply_overrides(facts, path):
     n = 0
     for row in csv.DictReader(open(path)):
+        pct = row["metric"] in extract.PCT_METRICS
+        value = float(row["value"]) * (1.0 if pct else UNITS[(row.get("unit") or "").strip().lower()])
         hit = [f for f in facts if f.doc == row["doc"] and f.metric == row["metric"] and f.period == row["period"]]
         for f in hit:
-            f.value, f.overridden, f.text = float(row["value"]), True, f"override by {row['analyst']}: {row['reason']}"
+            f.value, f.overridden, f.text = value, True, f"override by {row['analyst']}: {row['reason']}"
         if not hit:
-            unit = "pct" if row["metric"] in extract.PCT_METRICS else "usd"
-            facts.append(extract.Fact(row["metric"], row["period"], float(row["value"]), unit, row["doc"], "override",
-                                      "analyst entry", row["reason"], overridden=True))
+            facts.append(extract.Fact(row["metric"], row["period"], value, "pct" if pct else "inr", row["doc"],
+                                      "override", "analyst entry", row["reason"], overridden=True))
         n += 1
     return n
 
@@ -52,8 +57,8 @@ def check(folder, out_dir, overrides=None, with_scenarios=True, quiet=False):
         for f in findings:
             print(f"{f.id} [{f.severity:6}] {f.kind:11} {f.metric} {f.period}")
         if res:
-            gap = (res["equity_deck"] - res["equity_audited"]) / 1e6
-            print(f"equity value as pitched vs audited: {gap:+,.1f}M (wacc {res['wacc']:.0%}, growth {res['growth']:.1%})")
+            gap = (res["equity_deck"] - res["equity_audited"]) / 1e7
+            print(f"equity value as pitched vs audited: {gap:+,.1f} crore (wacc {res['wacc']:.0%}, growth {res['growth']:.1%})")
     return facts, findings, res
 
 
