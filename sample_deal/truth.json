@@ -5,40 +5,60 @@
   "model_unit": "crore",
   "planted": [
     {
-      "issue": "deck_ebitda",
+      "issue": "fn_ebitda_partial",
       "kind": "mismatch",
       "metric": "ebitda",
-      "period": "FY2024"
+      "period": "FY2024",
+      "explained": "partial"
     },
     {
-      "issue": "deck_net_debt",
+      "issue": "fn_audited_lease",
       "kind": "mismatch",
       "metric": "net_debt",
-      "period": "FY2024"
+      "period": "FY2024",
+      "explained": "full"
     },
     {
-      "issue": "model_capex",
+      "issue": "fn_capex_comment",
       "kind": "mismatch",
       "metric": "capex",
-      "period": "FY2024"
+      "period": "FY2024",
+      "explained": "full"
     },
     {
-      "issue": "model_revenue_py",
+      "issue": "deck_gross_margin",
       "kind": "mismatch",
-      "metric": "revenue",
-      "period": "FY2023"
+      "metric": "gross_margin",
+      "period": "FY2024",
+      "explained": ""
     },
     {
       "issue": "orderbook_unsupported",
       "kind": "unsupported",
       "metric": "order_book",
-      "period": "FY2024"
+      "period": "FY2024",
+      "explained": ""
     },
     {
       "issue": "segment_sum",
       "kind": "internal",
       "metric": "revenue",
-      "period": "FY2024"
+      "period": "FY2024",
+      "explained": ""
+    },
+    {
+      "issue": "fn_contingent",
+      "kind": "disclosure",
+      "metric": "contingent_liabilities",
+      "period": "FY2024",
+      "explained": ""
+    },
+    {
+      "issue": "fn_emphasis",
+      "kind": "disclosure",
+      "metric": "audit_emphasis",
+      "period": "FY2024",
+      "explained": ""
     }
   ]
 }
