@@ -8,12 +8,18 @@ Periods are Indian financial years (April to March), stored as FY2024 for the
 year ended 31 March 2024, whether the document wrote FY24, FY2023-24 or
 "31 March 2024". Projection columns (FY25E, FY26P) are ignored.
 
+Footnotes are read too: markers on row labels ((1), *, a superscript), the footnote
+text under the table, "Note:" lines and Excel cell comments. Each footnote is
+linked to the figures it qualifies, and the amounts and wording in it (adjusted,
+excludes, includes, pro forma, unaudited) are kept with the figure so the
+reconciliation can say whether a gap is explained by what the footnote discloses.
+
 It is regex/label based, so it works on documents laid out like the sample
 deal room and will miss things on messier files. Anything it can't read is
 skipped quietly, which means "no finding" is not the same as "checked".
 """
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 ROLE_BY_EXT = {".pptx": "deck", ".pdf": "audited", ".xlsx": "model"}
@@ -42,6 +48,8 @@ LABELS = {
               "capital expenditures", "capex"},
     "customer_concentration": {"top customer", "largest customer"},
     "order_book": {"order book", "order backlog", "orders on hand"},
+    "contingent_liabilities": set(),
+    "audit_emphasis": set(), "going_concern": set(), "audit_qualified": set(),
 }
 LABEL_TO_METRIC = {lab: m for m, labs in LABELS.items() for lab in labs}
 PCT_METRICS = {"gross_margin", "ebitda_margin", "customer_concentration"}
@@ -63,11 +71,23 @@ PROJECTION = set("EPFB")
 
 
 @dataclass
+class Note:
+    """a footnote, cell comment or 'Note:' line, with what it says about the figures."""
+    key: str            # normalised marker: "1", "*", "†"; "" when unmarked
+    text: str
+    doc: str
+    file: str
+    loc: str
+    amounts: list = field(default_factory=list)   # rupee amounts mentioned
+    tags: list = field(default_factory=list)      # adjusted, excludes, includes, pro_forma, unaudited, ...
+
+
+@dataclass
 class Fact:
     metric: str
     period: str
-    value: float        # rupees for money, percentage points for pct
-    unit: str           # inr / pct
+    value: float        # rupees for money, percentage points for pct (1.0 for a flag)
+    unit: str           # inr / pct / flag
     doc: str            # deck / audited / model
     file: str
     loc: str
@@ -75,6 +95,8 @@ class Fact:
     precision: float = 0.0
     derived: bool = False
     overridden: bool = False
+    mark: str = ""      # footnote marker on the label, if any
+    notes: list = field(default_factory=list)
 
 
 def periods_in(text):
@@ -101,8 +123,80 @@ def periods_in(text):
     return out
 
 
+SUP = str.maketrans("¹²³⁴⁵⁶⁷⁸⁹⁰", "1234567890")
+MARKER = r"(\(\d{1,2}\)|\[\d{1,2}\]|\*{1,3}|†|‡|[¹²³⁴⁵⁶⁷⁸⁹⁰]+)"
+TRAILING_MARK = re.compile(r"^(.*?\S)\s*" + MARKER + r"\s*$")
+FN_LINE = re.compile(r"^\s*" + MARKER + r"\s+(\S.*?)\s*$")
+UNMARKED_NOTE = re.compile(r"^\s*(?:notes?|source|sources)\s*:\s*(\S.*?)\s*$", re.I)
+AMT_CUR = re.compile(r"(?:₹|rs\.?|inr)?\s?(\d[\d,]*(?:\.\d+)?)\s*(crores?|cr|lakhs?|lacs?|million|mn)\b", re.I)
+TAGS = {
+    "adjusted": r"\badjusted\b",
+    "excludes": r"\b(?:excludes?|excluding|exclusive of|before|net of|other than)\b",
+    "includes": r"\b(?:includes?|including|inclusive of|incl\.)",
+    "pro_forma": r"pro[- ]?forma",
+    "unaudited": r"unaudited|management accounts|provisional|limited review",
+    "run_rate": r"run[- ]?rate|annuali[sz]ed",
+    "standalone": r"standalone",
+}
+
+
+def norm_marker(m):
+    m = m.strip().translate(SUP)
+    return m.strip("()[]") if m[:1] in "([" else m
+
+
+def split_marker(text):
+    """'EBITDA (1)' -> ('EBITDA', '1'); 'Net debt*' -> ('Net debt', '*'); no marker -> (text, '')."""
+    m = TRAILING_MARK.match(str(text))
+    if m and not re.fullmatch(r"\(\s*\d{1,2}\s*\)", str(text).strip()):
+        return m.group(1), norm_marker(m.group(2))
+    return str(text), ""
+
+
+def analyse_note(text):
+    amounts = []
+    for m in AMT_CUR.finditer(text):
+        amounts.append(float(m.group(1).replace(",", "")) * SCALE[m.group(2).lower()])
+    tags = [t for t, rx in TAGS.items() if re.search(rx, text, re.I)]
+    return amounts, tags
+
+
+def make_note(key, text, doc, file, loc):
+    amounts, tags = analyse_note(text)
+    return Note(key, text.strip()[:300], doc, file, loc, amounts, tags)
+
+
+def note_from_line(line, doc, file, loc):
+    """a footnote definition ('(1) Excludes ...', '* Adjusted ...', 'Note: ...') or None."""
+    m = FN_LINE.match(line)
+    if m:
+        return make_note(norm_marker(m.group(1)), m.group(2), doc, file, loc)
+    m = UNMARKED_NOTE.match(line)
+    if m:
+        return make_note("", m.group(1), doc, file, loc)
+    return None
+
+
+def mention_rx(metric):
+    words = sorted(LABELS.get(metric, ()), key=len, reverse=True)
+    words = [w for w in words if len(w) > 2]
+    return re.compile(r"\b(?:" + "|".join(re.escape(w) for w in words) + r")\b", re.I) if words else None
+
+
+def link_notes(facts, notes):
+    """attach each note to the figures it is marked on, or that its text names."""
+    for f in facts:
+        for n in notes:
+            marked = f.mark and n.key == f.mark
+            rx = mention_rx(f.metric)
+            named = (not n.key) and (n.amounts or n.tags) and rx and rx.search(n.text)
+            if (marked or named) and n not in f.notes:
+                f.notes.append(n)
+
+
 def clean_label(s):
     s = re.sub(r"\(.*?\)", "", str(s)).replace("$", "").replace("₹", "").replace(":", "")
+    s = re.sub(r"[*†‡¹²³⁴⁵⁶⁷⁸⁹⁰]", "", s)
     return re.sub(r"\s+", " ", s).strip().lower()
 
 
@@ -165,6 +259,7 @@ def make_fact(metric, period, num, dec, scale_or_pct, doc, file, loc, text):
 def scan_text(line, doc, file, loc, default_scale=1.0):
     """'Net debt (FY24): ₹18.0 Cr' style lines and 'x% of revenue' customer notes."""
     out = []
+    line, mark = split_marker(line)
     low = line.lower()
     if "customer" in low and "%" in line and "revenue" in low:
         per = [p for p in periods_in(line) if p]
@@ -172,6 +267,8 @@ def scan_text(line, doc, file, loc, default_scale=1.0):
             m = re.search(r"(\d+(?:\.\d+)?)\s*%", line)
             dec = len(m.group(1).split(".")[1]) if "." in m.group(1) else 0
             out.append(make_fact("customer_concentration", per[0], float(m.group(1)), dec, "%", doc, file, loc, line))
+        for f in out:
+            f.mark = mark
         return out
     m = re.match(r"^\s*[•\-\*]?\s*([A-Za-z][A-Za-z ,&/\-]*?)\s*(?:\(([^)]*)\))?\s*:\s*(.+)$", line)
     if not m:
@@ -187,6 +284,32 @@ def scan_text(line, doc, file, loc, default_scale=1.0):
     dec = len(num_s.split(".")[1]) if "." in num_s else 0
     hint = "%" if unit == "%" else SCALE.get(unit, default_scale)
     out.append(make_fact(metric, pers[0], float(num_s), dec, hint, doc, file, loc, line))
+    out[-1].mark = mark
+    return out
+
+
+DISCLOSURE_FLAGS = (
+    ("audit_emphasis", re.compile(r"emphasis of matter", re.I)),
+    ("going_concern", re.compile(r"material uncertainty related to going concern", re.I)),
+    ("audit_qualified", re.compile(r"basis for (?:qualified|adverse) opinion|basis for disclaimer of opinion", re.I)),
+)
+
+
+def scan_disclosure(line, doc, file, loc, scale=1.0):
+    """facts that only live in the notes or the auditor's report: contingent liabilities and audit flags."""
+    out = []
+    for metric, rx in DISCLOSURE_FLAGS:
+        if rx.search(line):
+            out.append(Fact(metric, "CURRENT", 1.0, "flag", doc, file, loc, line.strip()[:160]))
+    if re.search(r"contingent liabilit", line, re.I):
+        m = AMT_CUR.search(line)
+        if m:
+            per = [p for p in periods_in(line) if p]
+            num = m.group(1).replace(",", "")
+            dec = len(num.split(".")[1]) if "." in num else 0
+            f = make_fact("contingent_liabilities", per[0] if per else "CURRENT", float(num), dec,
+                          SCALE[m.group(2).lower()], doc, file, loc, line)
+            out.append(f)
     return out
 
 
@@ -216,12 +339,31 @@ def read_pdf(path, doc):
                 hs = header_scale(ln) if re.search(r"(in|₹|rs|inr)", ln, re.I) and len(ln) < 90 else None
                 if hs:
                     scale = hs
+            page_facts, notes, last = [], [], None
             for ln in lines:
-                facts += scan_text(ln, doc, path.name, f"p.{pno}")
-                m = re.match(r"^(.*?[A-Za-z\)])\s+((?:\(?-?\d[\d,]*(?:\.\d+)?\)?%?\s*)+)$", ln.strip())
-                if not m or not periods:
+                got = scan_text(ln, doc, path.name, f"p.{pno}")
+                page_facts += got
+                page_facts += scan_disclosure(ln, doc, path.name, f"p.{pno}", scale)
+                m = re.match(r"^(.*?[A-Za-z\)\*†‡¹²³⁴⁵⁶⁷⁸⁹⁰\]])\s+((?:\(?-?\d[\d,]*(?:\.\d+)?\)?%?\s*)+)$", ln.strip())
+                row_ok = bool(m and periods)
+                n = None if (got or row_ok) else note_from_line(ln, doc, path.name, f"p.{pno}")
+                if n:
+                    notes.append(n)
+                    last = n
                     continue
-                label, nums = clean_label(m.group(1)), NUM.findall(m.group(2))
+                if last is not None and not got and not row_ok and not is_header(ln) and ln.strip() \
+                        and not FN_LINE.match(ln) and len(last.text) < 280 and not re.match(r"^\s*note \d+\.", ln, re.I):
+                    # a footnote wrapped onto the next line
+                    cont = make_note(last.key, last.text + " " + ln.strip(), doc, path.name, last.loc)
+                    last.text, last.amounts, last.tags = cont.text, cont.amounts, cont.tags
+                    continue
+                last = None
+                if not row_ok:
+                    continue
+                label_raw, mark = split_marker(m.group(1))
+                label, nums = clean_label(label_raw), NUM.findall(m.group(2))
+                if not mark and len(nums) > len(periods) and re.fullmatch(r"\(\d{1,2}\)", nums[0]):
+                    mark, nums = norm_marker(nums[0]), nums[1:]    # "(1)" sat between the label and the figures
                 if len(nums) > len(periods):
                     nums = nums[-len(periods):]      # drop the note-number column
                 if label.startswith("segment ") or label == "total segment revenue":
@@ -230,11 +372,14 @@ def read_pdf(path, doc):
                     metric = LABEL_TO_METRIC.get(label)
                 if not metric:
                     continue
-                for per, n in zip(periods, nums):
-                    c = parse_cell(n)
+                for per, num in zip(periods, nums):
+                    c = parse_cell(num)
                     if c and per:
-                        facts.append(make_fact(metric, per, c[0], c[1], "%" if c[2] else scale, doc, path.name,
-                                               f"p.{pno}", ln))
+                        f = make_fact(metric, per, c[0], c[1], "%" if c[2] else scale, doc, path.name, f"p.{pno}", ln)
+                        f.mark = mark
+                        page_facts.append(f)
+            link_notes(page_facts, notes)
+            facts += page_facts
     return facts
 
 
@@ -242,24 +387,34 @@ def read_pptx(path, doc):
     from pptx import Presentation
     facts = []
     for sno, slide in enumerate(Presentation(str(path)).slides, 1):
+        slide_facts, notes = [], []
         for shape in slide.shapes:
             if shape.has_table:
                 rows = [[c.text for c in r.cells] for r in shape.table.rows]
                 periods = [(periods_in(c) or [None])[0] for c in rows[0][1:]]
                 for r in rows[1:]:
-                    metric = LABEL_TO_METRIC.get(clean_label(r[0]))
-                    hint = unit_hint(r[0]) or unit_hint(rows[0][0])
+                    label_raw, mark = split_marker(r[0])
+                    metric = LABEL_TO_METRIC.get(clean_label(label_raw))
+                    hint = unit_hint(label_raw) or unit_hint(rows[0][0])
                     if not metric:
                         continue
                     for per, cell in zip(periods, r[1:]):
                         c = parse_cell(cell)
                         if c and per:
-                            facts.append(make_fact(metric, per, c[0], c[1], hint or 1.0, doc, path.name,
-                                                   f"slide {sno}", " | ".join(r)))
+                            f = make_fact(metric, per, c[0], c[1], hint or 1.0, doc, path.name,
+                                          f"slide {sno}", " | ".join(r))
+                            f.mark = mark
+                            slide_facts.append(f)
             elif shape.has_text_frame:
                 for para in shape.text_frame.paragraphs:
                     txt = "".join(r.text for r in para.runs)
-                    facts += scan_text(txt, doc, path.name, f"slide {sno}")
+                    got = scan_text(txt, doc, path.name, f"slide {sno}")
+                    slide_facts += got
+                    n = None if got else note_from_line(txt, doc, path.name, f"slide {sno}")
+                    if n:
+                        notes.append(n)
+        link_notes(slide_facts, notes)
+        facts += slide_facts
     return facts
 
 
@@ -269,6 +424,7 @@ def read_xlsx(path, doc):
     wb = openpyxl.load_workbook(path, data_only=True)
     for ws in wb.worksheets:
         scale, header_row, cols = 1.0, None, {}
+        sheet_facts, notes = [], []
         for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 6)):
             for c in row:
                 if isinstance(c.value, str):
@@ -284,14 +440,26 @@ def read_xlsx(path, doc):
             if header_row is None or row[0].row <= header_row:
                 continue
             label = next((c.value for c in row if isinstance(c.value, str)), None)
-            metric = LABEL_TO_METRIC.get(clean_label(label)) if label else None
+            if label:
+                n = note_from_line(label, doc, path.name, f"{ws.title}!{row[0].coordinate}")
+                if n:
+                    notes.append(n)
+                    continue
+            label_raw, mark = split_marker(label) if label else ("", "")
+            metric = LABEL_TO_METRIC.get(clean_label(label_raw)) if label else None
             if not metric:
                 continue
             for c in row:
                 if c.column in cols and isinstance(c.value, (int, float)):
                     dec = len(str(c.value).split(".")[1]) if "." in str(c.value) else 0
-                    facts.append(make_fact(metric, cols[c.column], float(c.value), dec, scale, doc, path.name,
-                                           f"{ws.title}!{c.coordinate}", f"{label}: {c.value}"))
+                    f = make_fact(metric, cols[c.column], float(c.value), dec, scale, doc, path.name,
+                                  f"{ws.title}!{c.coordinate}", f"{label}: {c.value}")
+                    f.mark = mark
+                    if c.comment and c.comment.text:
+                        f.notes.append(make_note("", c.comment.text, doc, path.name, f"{ws.title}!{c.coordinate} (comment)"))
+                    sheet_facts.append(f)
+        link_notes(sheet_facts, notes)
+        facts += sheet_facts
     return facts
 
 

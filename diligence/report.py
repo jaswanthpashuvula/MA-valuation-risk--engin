@@ -16,12 +16,12 @@ def write_report(findings, skipped, out_dir, overrides=0):
     with open(out / "findings.csv", "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["id", "severity", "kind", "metric", "period", "claim_doc", "claim_value", "claim_location",
-                    "reference_doc", "reference_value", "reference_location", "difference", "question"])
+                    "reference_doc", "reference_value", "reference_location", "difference", "footnote_check", "question"])
         for f in findings:
             r = f.ref
             w.writerow([f.id, f.severity, f.kind, f.metric, f.period, f.claim.doc, fmt(f.claim), f.claim.loc,
                         r.doc if r else "", fmt(r) if r else "", r.loc if r else "",
-                        gap(f) if r else "", f.question])
+                        gap(f) if r else "", f.explained, f.question])
 
     lines = ["# Diligence check", "",
              f"{len(findings)} findings: {counts['high']} high, {counts['medium']} medium, {counts['low']} low.", ""]
@@ -32,6 +32,11 @@ def write_report(findings, skipped, out_dir, overrides=0):
     lines += ["Reference order when documents disagree: audited statements, then model, then deck.", ""]
     for f in findings:
         lines += [f"## {f.id}  [{f.severity}]  {f.metric.replace('_', ' ')}, {f.period} ({f.kind})", ""]
+        if f.kind == "disclosure":
+            lines.append(f"- Where: {f.claim.doc}, {f.claim.file} {f.claim.loc}")
+            lines.append(f'  - source text: "{f.claim.text}"')
+            lines += [f"- Ask: {f.question}", ""]
+            continue
         lines.append(f"- Claim: {fmt(f.claim)} in {f.claim.doc}, {f.claim.file} {f.claim.loc}")
         if f.claim.text:
             lines.append(f'  - source text: "{f.claim.text}"')
@@ -39,5 +44,12 @@ def write_report(findings, skipped, out_dir, overrides=0):
             lines.append(f"- Reference: {fmt(f.ref)} in {f.ref.doc}, {f.ref.file} {f.ref.loc}")
             lines.append(f"  - source text: \"{f.ref.text}\"")
             lines.append(f"- Gap: {gap(f)}")
+        for n in f.notes or []:
+            lines.append(f'- Footnote ({n.loc}): "{n.text}"')
+        if f.explained:
+            lines.append("- Footnote check: " + {
+                "full": "the amount in the footnote accounts for the whole gap (severity lowered)",
+                "partial": f"the footnote accounts for part of the gap; {fmt(f.unexplained, 'inr')} is unexplained",
+                "noted": "the footnote qualifies the figure but does not account for the gap"}[f.explained])
         lines += [f"- Ask: {f.question}", ""]
     (out / "report.md").write_text("\n".join(lines))
