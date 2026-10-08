@@ -1,20 +1,23 @@
 """
-Small DCF used to put a dollar figure on a discrepancy. Gordon-growth terminal
+Small DCF used to put a rupee figure on a discrepancy. Gordon-growth terminal
 value, flat margins, WACC and growth are assumptions you pass in, not outputs.
 """
 import numpy as np
 
 
-def enterprise_value(rev0, growth, margin, da_pct, capex_pct, wacc, tg=0.025, years=5, tax=0.25, nwc_pct=0.10):
-    prev, pv, fcff = rev0, 0.0, 0.0
+def enterprise_value(rev0, growth, margin, da_pct, capex_pct, wacc, tg=0.05, years=5, tax=0.2517, nwc_pct=0.10):
+    prev, pv, last_rev, last_ebit, last_da = rev0, 0.0, rev0, 0.0, 0.0
     for t in range(1, years + 1):
         rev = prev * (1 + growth)
         da = rev * da_pct
         ebit = rev * margin - da
         fcff = ebit * (1 - tax) + da - rev * capex_pct - (rev - prev) * nwc_pct
         pv += fcff / (1 + wacc) ** t
-        prev = rev
-    tv = fcff * (1 + tg) / (max(wacc, tg + 0.005) - tg)
+        prev, last_rev, last_ebit, last_da = rev, rev, ebit, da
+    # terminal cash flow: same margins, but working capital investment at the terminal growth rate
+    # rather than the forecast growth rate
+    fcff_t = last_ebit * (1 - tax) + last_da - last_rev * capex_pct - last_rev * tg / (1 + tg) * nwc_pct
+    tv = fcff_t * (1 + tg) / (max(wacc, tg + 0.005) - tg)
     return pv + tv / (1 + wacc) ** years
 
 
@@ -40,7 +43,7 @@ def cagr(facts, periods):
     return float(np.clip((revs[-1] / revs[0]) ** (1 / (len(revs) - 1)) - 1, -0.1, 0.25))
 
 
-def run(facts, period, periods, wacc=0.10, tg=0.025):
+def run(facts, period, periods, wacc=0.12, tg=0.05):
     aud, deck = base_inputs(facts, period)
     if None in aud.values():
         return None
@@ -69,23 +72,23 @@ def plot(res, out_path, period):
     import matplotlib.pyplot as plt
 
     fig, (a, b) = plt.subplots(1, 2, figsize=(11, 4.4), gridspec_kw={"width_ratios": [1.2, 1]})
-    im = a.imshow(res["grid"] / 1e6, cmap="Blues", aspect="auto", origin="lower")
+    im = a.imshow(res["grid"] / 1e7, cmap="Blues", aspect="auto", origin="lower")
     a.set_xticks(range(len(res["grid_g"])), [f"{x:.1%}" for x in res["grid_g"]])
     a.set_yticks(range(len(res["grid_w"])), [f"{x:.1%}" for x in res["grid_w"]])
     for i in range(res["grid"].shape[0]):
         for j in range(res["grid"].shape[1]):
-            a.text(j, i, f"{res['grid'][i, j] / 1e6:,.0f}", ha="center", va="center", fontsize=8,
+            a.text(j, i, f"{res['grid'][i, j] / 1e7:,.0f}", ha="center", va="center", fontsize=8,
                    color="white" if res["grid"][i, j] > 0.75 * res["grid"].max() else "black")
     a.set_xlabel("revenue growth"); a.set_ylabel("WACC")
-    a.set_title("EV on audited numbers ($M)")
+    a.set_title("EV on audited numbers (₹ crore)")
     labels = ["audited", "as pitched in deck"]
-    vals = [res["equity_audited"] / 1e6, res["equity_deck"] / 1e6]
+    vals = [res["equity_audited"] / 1e7, res["equity_deck"] / 1e7]
     b.bar(labels, vals, color=["#3b6ea5", "#c8793b"], width=0.5)
     for i, v in enumerate(vals):
         b.text(i, v, f"{v:,.0f}", ha="center", va="bottom", fontsize=9)
     gap = vals[1] - vals[0]
-    b.set_title(f"Equity value, {period} base: deck is {gap:+,.0f}M vs audited")
-    b.set_ylabel("$M")
+    b.set_title(f"Equity value, {period}: deck {gap:+,.0f} cr vs audited")
+    b.set_ylabel("₹ crore")
     for ax in (a, b):
         ax.tick_params(labelsize=8)
     fig.tight_layout()
