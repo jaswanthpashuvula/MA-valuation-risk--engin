@@ -19,13 +19,23 @@ def run(n=100, start=1000, hard=False, clean=False):
     by_issue = Counter()
     seen_issue = Counter()
     wrong = []
+    fn_total = fn_right = 0
     for seed in range(start, start + n):
         with tempfile.TemporaryDirectory() as tmp:
             planted = build(tmp, seed, issues=[] if clean else None, hard=hard)
             facts, _ = extract.read_deal_room(tmp)
             _, findings = reconcile.run_checks(facts)
         truth = {(t["kind"], t["metric"], t["period"]): t["issue"] for t in planted}
+        want = {(t["kind"], t["metric"], t["period"]): t["explained"] for t in planted if t.get("explained")}
         got = {(f.kind, f.metric, f.period) for f in findings}
+        for f in findings:
+            k = (f.kind, f.metric, f.period)
+            if k in want:
+                fn_total += 1
+                if f.explained == want[k]:
+                    fn_right += 1
+                else:
+                    wrong.append((seed, "footnote check", truth[k], want[k], f.explained or "none"))
         for key, issue in truth.items():
             seen_issue[issue] += 1
             if key in got:
@@ -39,6 +49,7 @@ def run(n=100, start=1000, hard=False, clean=False):
             wrong.append((seed, "false flag", key))
     return {"deals": n, "planted": tp + fn, "flags": tp + fp, "correct_flags": tp,
             "false_flags": fp, "missed": fn,
+            "footnote_checks": f"{fn_right}/{fn_total}",
             "precision": tp / max(tp + fp, 1), "recall": tp / max(tp + fn, 1),
             "by_issue": {k: f"{by_issue[k]}/{seen_issue[k]}" for k in ISSUES if seen_issue[k]},
             "errors": wrong}
@@ -59,6 +70,8 @@ if __name__ == "__main__":
               f"(missed {res['missed']}, false flags {res['false_flags']})")
     else:
         print(f"false flags on deals with nothing planted: {res['false_flags']}")
+    if res["footnote_checks"] != "0/0":
+        print(f"footnote check said the right thing (full/partial/noted) on {res['footnote_checks']}")
     for k, v in res["by_issue"].items():
         print(f"  {k:18} {v}")
     for e in res["errors"][:20]:

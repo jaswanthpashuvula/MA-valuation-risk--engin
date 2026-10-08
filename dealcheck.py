@@ -55,7 +55,9 @@ def check(folder, out_dir, overrides=None, with_scenarios=True, quiet=False):
             scenarios.plot(res, out / "scenario_summary.png", periods[-1])
     if not quiet:
         for f in findings:
-            print(f"{f.id} [{f.severity:6}] {f.kind:11} {f.metric} {f.period}")
+            tag = {"full": "  footnote explains the gap", "partial": "  footnote explains part of the gap",
+                   "noted": "  footnote present, amount not checkable"}.get(f.explained, "")
+            print(f"{f.id} [{f.severity:6}] {f.kind:11} {f.metric} {f.period}{tag}")
         if res:
             gap = (res["equity_deck"] - res["equity_audited"]) / 1e7
             print(f"equity value as pitched vs audited: {gap:+,.1f} crore (wacc {res['wacc']:.0%}, growth {res['growth']:.1%})")
