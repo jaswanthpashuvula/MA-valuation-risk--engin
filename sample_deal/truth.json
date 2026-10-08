@@ -1,0 +1,41 @@
+{
+  "seed": 7,
+  "planted": [
+    {
+      "issue": "deck_ebitda",
+      "kind": "mismatch",
+      "metric": "ebitda",
+      "period": "FY2024"
+    },
+    {
+      "issue": "deck_gross_margin",
+      "kind": "mismatch",
+      "metric": "gross_margin",
+      "period": "FY2024"
+    },
+    {
+      "issue": "model_capex",
+      "kind": "mismatch",
+      "metric": "capex",
+      "period": "FY2024"
+    },
+    {
+      "issue": "model_revenue_py",
+      "kind": "mismatch",
+      "metric": "revenue",
+      "period": "FY2023"
+    },
+    {
+      "issue": "arr_unsupported",
+      "kind": "unsupported",
+      "metric": "arr",
+      "period": "FY2024"
+    },
+    {
+      "issue": "segment_sum",
+      "kind": "internal",
+      "metric": "revenue",
+      "period": "FY2024"
+    }
+  ]
+}
