@@ -1,5 +1,8 @@
 {
-  "seed": 7,
+  "seed": 26,
+  "hard": false,
+  "pdf_unit": "crore",
+  "model_unit": "crore",
   "planted": [
     {
       "issue": "deck_ebitda",
@@ -8,9 +11,9 @@
       "period": "FY2024"
     },
     {
-      "issue": "deck_gross_margin",
+      "issue": "deck_net_debt",
       "kind": "mismatch",
-      "metric": "gross_margin",
+      "metric": "net_debt",
       "period": "FY2024"
     },
     {
@@ -26,9 +29,9 @@
       "period": "FY2023"
     },
     {
-      "issue": "arr_unsupported",
+      "issue": "orderbook_unsupported",
       "kind": "unsupported",
-      "metric": "arr",
+      "metric": "order_book",
       "period": "FY2024"
     },
     {
