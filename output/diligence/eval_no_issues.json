@@ -1,0 +1,11 @@
+{
+  "deals": 200,
+  "planted": 0,
+  "flags": 0,
+  "correct_flags": 0,
+  "false_flags": 0,
+  "missed": 0,
+  "precision": 0.0,
+  "recall": 0.0,
+  "by_issue": {}
+}
